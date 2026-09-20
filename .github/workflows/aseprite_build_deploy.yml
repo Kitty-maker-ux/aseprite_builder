@@ -14,6 +14,10 @@ env:
   BUILD_TYPE: Release
   NINJA_VERSION: "1.12.1"
 
+  # This Skia package must match the Aseprite source version being built.
+  SKIA_VERSION: "m81-b607b32047"
+  SKIA_ARCHIVE: "Skia-Windows-Release-X64.zip"
+
 permissions:
   contents: write
 
@@ -37,8 +41,8 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/aseprite/aseprite/releases/latest")"
 
-          latest_tag="$(echo "$data" | jq -r '.tag_name')"
-          version_info="$(echo "$data" | jq -r '.body')"
+          latest_tag="$(jq -r '.tag_name' <<< "$data")"
+          version_info="$(jq -r '.body // ""' <<< "$data")"
 
           {
             echo "latest_tag=$latest_tag"
@@ -58,80 +62,95 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $installDir = "$env:RUNNER_TEMP\ninja"
-          $zipPath = "$env:RUNNER_TEMP\ninja.zip"
-          $url = "https://github.com/ninja-build/ninja/releases/download/v${env:NINJA_VERSION}/ninja-win.zip"
+          $installDir = Join-Path $env:RUNNER_TEMP "ninja"
+          $zipPath = Join-Path $env:RUNNER_TEMP "ninja.zip"
+          $url = "https://github.com/ninja-build/ninja/releases/download/v$env:NINJA_VERSION/ninja-win.zip"
 
-          New-Item `
-            -ItemType Directory `
-            -Force `
-            -Path $installDir |
-            Out-Null
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
 
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile $zipPath
+          Add-Content -Path $env:GITHUB_PATH -Value $installDir
 
-          Expand-Archive `
-            -Path $zipPath `
-            -DestinationPath $installDir `
-            -Force
-
-          Add-Content `
-            -Path $env:GITHUB_PATH `
-            -Value $installDir
-
-          & "$installDir\ninja.exe" --version
+          & (Join-Path $installDir "ninja.exe") --version
 
       - name: Restore Skia cache
         id: skia_cache
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: skia
-          key: skia-windows-m81-b607b32047
+          key: skia-windows-x64-${{ env.SKIA_VERSION }}-v2
 
       - name: Download and verify Skia
         shell: pwsh
+        env:
+          SKIA_CACHE_HIT: ${{ steps.skia_cache.outputs.cache-hit }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $skiaFile = "Skia-Windows-Release-X64.zip"
-          $skiaUrl = "https://github.com/aseprite/skia/releases/download/m81-b607b32047/$skiaFile"
+          $skiaRoot = Join-Path $env:GITHUB_WORKSPACE "skia"
+          $skiaDependency = Join-Path $skiaRoot "third_party\externals\libjpeg-turbo"
+          $skiaLibraryDir = Join-Path $skiaRoot "out\Release-x64"
+          $skiaLibrary = Join-Path $skiaLibraryDir "skia.lib"
 
-          if ("${{ steps.skia_cache.outputs.cache-hit }}" -eq "true") {
-            Write-Host "Skia was restored from cache."
+          if ($env:SKIA_CACHE_HIT -ne "true") {
+            $archive = Join-Path $env:RUNNER_TEMP $env:SKIA_ARCHIVE
+            $downloadUrl = "https://github.com/aseprite/skia/releases/download/$env:SKIA_VERSION/$env:SKIA_ARCHIVE"
+
+            if (Test-Path $skiaRoot) {
+              Remove-Item $skiaRoot -Recurse -Force
+            }
+
+            New-Item -ItemType Directory -Force -Path $skiaRoot | Out-Null
+
+            Write-Host "Downloading Skia from $downloadUrl"
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $archive
+
+            7z x $archive "-o$skiaRoot" -y | Out-Null
+
+            # Some archives contain a single top-level directory.
+            $nestedSkia = Join-Path $skiaRoot "skia"
+
+            if (
+              (Test-Path (Join-Path $nestedSkia "include")) -and
+              (Test-Path (Join-Path $nestedSkia "out"))
+            ) {
+              Write-Host "Flattening nested Skia directory."
+              Get-ChildItem -LiteralPath $nestedSkia -Force |
+                Move-Item -Destination $skiaRoot -Force
+
+              Remove-Item $nestedSkia -Recurse -Force
+            }
           }
           else {
-            Invoke-WebRequest `
-              -Uri $skiaUrl `
-              -OutFile $skiaFile
-
-            New-Item `
-              -ItemType Directory `
-              -Force `
-              -Path skia |
-              Out-Null
-
-            7z x `
-              $skiaFile `
-              "-oskia" `
-              -y |
-              Out-Null
+            Write-Host "Skia was restored from cache."
           }
 
-          if (-not (Test-Path "skia")) {
-            throw "The Skia directory was not found."
+          $requiredPaths = @(
+            $skiaRoot,
+            (Join-Path $skiaRoot "include"),
+            (Join-Path $skiaRoot "third_party"),
+            $skiaDependency,
+            $skiaLibraryDir,
+            $skiaLibrary
+          )
+
+          foreach ($path in $requiredPaths) {
+            if (-not (Test-Path $path)) {
+              Write-Host "Skia directory contents:"
+              if (Test-Path $skiaRoot) {
+                Get-ChildItem $skiaRoot -Recurse -Depth 3 |
+                  Select-Object FullName
+              }
+
+              throw "Required Skia path is missing: $path"
+            }
           }
 
-          if (-not (Test-Path "skia\out\Release-x64")) {
-            throw "The Skia library directory was not found: skia\out\Release-x64"
-          }
-
-          if (-not (Test-Path "skia\include")) {
-            throw "The Skia include directory was not found: skia\include"
-          }
-
-          Write-Host "Skia installation verified."
+          Write-Host "Skia verified successfully."
+          Write-Host "SKIA_DIR: $skiaRoot"
+          Write-Host "SKIA_LIBRARY_DIR: $skiaLibraryDir"
+          Write-Host "SKIA_LIBRARY: $skiaLibrary"
 
       - name: Checkout Aseprite source with submodules
         uses: actions/checkout@v4
@@ -147,27 +166,23 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          New-Item `
-            -ItemType Directory `
-            -Path "aseprite\build" `
-            -Force |
-            Out-Null
+          $sourceRoot = Join-Path $env:GITHUB_WORKSPACE "aseprite"
 
-          if (-not (Test-Path "aseprite\CMakeLists.txt")) {
+          if (-not (Test-Path (Join-Path $sourceRoot "CMakeLists.txt"))) {
             throw "Aseprite CMakeLists.txt was not found."
           }
 
-          if (-not (Test-Path "aseprite\laf\cmake\c_flag_overrides.cmake")) {
+          if (-not (Test-Path (Join-Path $sourceRoot "laf\cmake\c_flag_overrides.cmake"))) {
             throw "The laf submodule was not checked out correctly."
           }
 
-          if (-not (Test-Path "aseprite\laf\cmake\cxx_flag_overrides.cmake")) {
+          if (-not (Test-Path (Join-Path $sourceRoot "laf\cmake\cxx_flag_overrides.cmake"))) {
             throw "The laf CMake files were not found."
           }
 
           Write-Host "Aseprite source and submodules verified."
 
-      - name: Configure and build Aseprite
+      - name: Configure Aseprite
         shell: cmd
         run: |
           set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -177,54 +192,28 @@ jobs:
             exit /b 1
           )
 
-          set "VSINSTALL="
-
           for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
             set "VSINSTALL=%%i"
           )
 
           if not defined VSINSTALL (
-            echo A Visual Studio installation with C++ tools was not found.
+            echo Visual Studio C++ tools were not found.
             exit /b 1
           )
-
-          echo Using Visual Studio installation:
-          echo %VSINSTALL%
 
           call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64
 
           if errorlevel 1 (
-            echo Failed to initialize the Visual Studio developer environment.
+            echo Failed to initialize the Visual Studio environment.
             exit /b 1
           )
 
-          where cl
+          where cl || exit /b 1
+          where cmake || exit /b 1
+          where ninja || exit /b 1
 
-          if errorlevel 1 (
-            echo MSVC compiler was not found.
-            exit /b 1
-          )
-
-          where cmake
-
-          if errorlevel 1 (
-            echo CMake was not found.
-            exit /b 1
-          )
-
-          where ninja
-
-          if errorlevel 1 (
-            echo Ninja was not found.
-            exit /b 1
-          )
-
-          if exist "%GITHUB_WORKSPACE%\aseprite\build\CMakeCache.txt" (
-            del /f /q "%GITHUB_WORKSPACE%\aseprite\build\CMakeCache.txt"
-          )
-
-          if exist "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles" (
-            rmdir /s /q "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles"
+          if exist "%GITHUB_WORKSPACE%\aseprite\build" (
+            rmdir /s /q "%GITHUB_WORKSPACE%\aseprite\build"
           )
 
           cmake ^
@@ -232,25 +221,23 @@ jobs:
             -B "%GITHUB_WORKSPACE%\aseprite\build" ^
             -G Ninja ^
             -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
-            -DCMAKE_IGNORE_PATH="C:/ProgramData/chocolatey/bin/;C:/Strawberry/c/bin/" ^
             -DLAF_BACKEND=skia ^
+            -DENABLE_CCACHE=OFF ^
             -DSKIA_DIR="%GITHUB_WORKSPACE%\skia" ^
-            -DSKIA_LIBRARY_DIR="%GITHUB_WORKSPACE%\skia\out\Release-x64"
+            -DSKIA_LIBRARY_DIR="%GITHUB_WORKSPACE%\skia\out\Release-x64" ^
+            -DSKIA_LIBRARY="%GITHUB_WORKSPACE%\skia\out\Release-x64\skia.lib"
 
           if errorlevel 1 (
             echo CMake configuration failed.
             exit /b 1
           )
 
-          if not exist "%GITHUB_WORKSPACE%\aseprite\build\build.ninja" (
-            echo CMake did not create build.ninja.
-            exit /b 1
-          )
-
+      - name: Build Aseprite
+        shell: cmd
+        run: |
           cmake ^
             --build "%GITHUB_WORKSPACE%\aseprite\build" ^
             --target aseprite ^
-            --config %BUILD_TYPE% ^
             --parallel
 
           if errorlevel 1 (
@@ -258,37 +245,33 @@ jobs:
             exit /b 1
           )
 
-      - name: Clean build directory
+      - name: Clean generated build files
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $binPath = "aseprite\build\bin"
+          $binPath = Join-Path $env:GITHUB_WORKSPACE "aseprite\build\bin"
 
           $filesToRemove = @(
             "gen",
-            "modp_b64_gen",
             "gen.exe",
             "gen.exe.manifest",
+            "modp_b64_gen",
             "modp_b64_gen.exe",
             "modp_b64_gen.exe.manifest"
           )
 
           foreach ($file in $filesToRemove) {
-            $filePath = Join-Path $binPath $file
+            $path = Join-Path $binPath $file
 
-            if (Test-Path $filePath) {
-              Remove-Item `
-                $filePath `
-                -Force
+            if (Test-Path $path) {
+              Remove-Item $path -Force
             }
           }
 
       - name: Make Aseprite portable
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-
           Set-Content `
             -Path "aseprite\build\bin\aseprite.ini" `
             -Value "# This file is here so Aseprite behaves as a portable program"
@@ -296,15 +279,13 @@ jobs:
       - name: Verify build output
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $executable = "aseprite\build\bin\aseprite.exe"
 
-          $asepriteExecutable = "aseprite\build\bin\aseprite.exe"
-
-          if (-not (Test-Path $asepriteExecutable)) {
-            throw "Aseprite executable was not found at $asepriteExecutable"
+          if (-not (Test-Path $executable)) {
+            throw "Aseprite executable was not found at $executable"
           }
 
-          Write-Host "Build output verified: $asepriteExecutable"
+          Write-Host "Build output verified: $executable"
 
       - name: Create release archive
         shell: pwsh
@@ -312,18 +293,14 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $tag = "${{ needs.check-version.outputs.latest_tag }}"
-          $archive = "Aseprite-$tag-Windows.zip"
-          $archivePath = "aseprite\build\bin\$archive"
+          $archiveName = "Aseprite-$tag-Windows.zip"
+          $archivePath = Join-Path $env:GITHUB_WORKSPACE "aseprite\build\bin\$archiveName"
 
           if (Test-Path $archivePath) {
-            Remove-Item `
-              $archivePath `
-              -Force
+            Remove-Item $archivePath -Force
           }
 
-          7z a `
-            $archivePath `
-            "aseprite\build\bin\*"
+          7z a $archivePath "aseprite\build\bin\*" | Out-Null
 
           if (-not (Test-Path $archivePath)) {
             throw "Release archive was not created."
@@ -364,10 +341,7 @@ jobs:
           tag="${{ needs.check-version.outputs.latest_tag }}"
           archive="aseprite/build/bin/Aseprite-$tag-Windows.zip"
 
-          if [ ! -f "$archive" ]; then
-            echo "Release archive not found: $archive"
-            exit 1
-          fi
+          test -f "$archive"
 
           gh release upload "$tag" "$archive" \
             --repo "$GITHUB_REPOSITORY" \
