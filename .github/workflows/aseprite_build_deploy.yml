@@ -242,6 +242,7 @@ jobs:
             -B "%GITHUB_WORKSPACE%\aseprite\build" ^
             -G Ninja ^
             -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ^
             -DLAF_BACKEND=skia ^
             -DENABLE_CCACHE=OFF ^
             -DSKIA_DIR="%GITHUB_WORKSPACE%\skia" ^
