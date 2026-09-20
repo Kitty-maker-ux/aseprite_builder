@@ -50,7 +50,7 @@ jobs:
 
       - name: Check whether this version was already built
         id: version_check
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: latest-version.txt
           key: aseprite-version-${{ steps.version_info.outputs.latest_tag }}
@@ -131,7 +131,7 @@ jobs:
 
       - name: Get Skia from cache
         id: skia_cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: skia
           key: skia-${{ runner.os }}-m81-b607b32047
@@ -155,7 +155,11 @@ jobs:
             -Path skia |
             Out-Null
 
-          7z x $skiaFile "-oskia" -y
+          7z x `
+            $skiaFile `
+            "-oskia" `
+            -y |
+            Out-Null
 
       - name: Download Aseprite source
         shell: pwsh
@@ -295,7 +299,7 @@ jobs:
             "gen.exe",
             "gen.exe.manifest",
             "modp_b64_gen.exe",
-            "modp_b64_gen.exe.manifest
+            "modp_b64_gen.exe.manifest"
           )
 
           foreach ($file in $filesToRemove) {
