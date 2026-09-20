@@ -5,7 +5,7 @@ on:
     inputs:
       force_build:
         description: "Build even if this Aseprite version is already cached"
-        required: false
+        required: true
         default: false
         type: boolean
 
