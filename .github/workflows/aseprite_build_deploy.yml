@@ -207,11 +207,61 @@ jobs:
       - name: Configure and build Aseprite
         shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
+          set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          if not exist "%VSWHERE%" (
+            echo vswhere.exe was not found.
+            exit /b 1
+          )
+
+          set "VSINSTALL="
+
+          for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+            set "VSINSTALL=%%i"
+          )
+
+          if not defined VSINSTALL (
+            echo A Visual Studio installation with C++ tools was not found.
+            exit /b 1
+          )
+
+          echo Using Visual Studio installation:
+          echo %VSINSTALL%
+
+          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64
 
           if errorlevel 1 (
             echo Failed to initialize the Visual Studio developer environment.
             exit /b 1
+          )
+
+          where cl
+
+          if errorlevel 1 (
+            echo MSVC compiler was not found.
+            exit /b 1
+          )
+
+          where cmake
+
+          if errorlevel 1 (
+            echo CMake was not found.
+            exit /b 1
+          )
+
+          where ninja
+
+          if errorlevel 1 (
+            echo Ninja was not found.
+            exit /b 1
+          )
+
+          if exist "%GITHUB_WORKSPACE%\aseprite\build\CMakeCache.txt" (
+            del /f /q "%GITHUB_WORKSPACE%\aseprite\build\CMakeCache.txt"
+          )
+
+          if exist "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles" (
+            rmdir /s /q "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles"
           )
 
           cmake ^
@@ -226,6 +276,11 @@ jobs:
 
           if errorlevel 1 (
             echo CMake configuration failed.
+            exit /b 1
+          )
+
+          if not exist "%GITHUB_WORKSPACE%\aseprite\build\build.ninja" (
+            echo CMake did not create build.ninja.
             exit /b 1
           )
 
@@ -295,14 +350,23 @@ jobs:
 
           $tag = "${{ needs.check-version.outputs.latest_tag }}"
           $archive = "Aseprite-$tag-Windows.zip"
+          $archivePath = "aseprite\build\bin\$archive"
+
+          if (Test-Path $archivePath) {
+            Remove-Item `
+              $archivePath `
+              -Force
+          }
 
           7z a `
-            "aseprite\build\bin\$archive" `
+            $archivePath `
             "aseprite\build\bin\*"
 
-          if (-not (Test-Path "aseprite\build\bin\$archive")) {
+          if (-not (Test-Path $archivePath)) {
             throw "Release archive was not created."
           }
+
+          Write-Host "Created release archive: $archivePath"
 
       - name: Create draft GitHub release
         shell: bash
