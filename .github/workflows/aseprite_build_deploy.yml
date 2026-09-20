@@ -1,4 +1,4 @@
-name: Build and deploy Aseprite
+name: Build Aseprite
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ env:
   SKIA_ARCHIVE: "Skia-Windows-Release-X64.zip"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-aseprite:
@@ -97,9 +97,6 @@ jobs:
             throw "Aseprite CMakeLists.txt was not found: $cmakeFile"
           }
 
-          Write-Host "Aseprite source verified:"
-          Write-Host $sourceDir
-
       - name: Download and verify Skia
         shell: pwsh
         run: |
@@ -122,9 +119,6 @@ jobs:
             -Force |
             Out-Null
 
-          Write-Host "Downloading Skia from:"
-          Write-Host $downloadUrl
-
           curl.exe `
             --fail `
             --location `
@@ -139,27 +133,17 @@ jobs:
             throw "Skia download failed."
           }
 
-          if (-not (Test-Path -LiteralPath $archivePath)) {
-            throw "Skia archive was not downloaded."
-          }
-
-          Write-Host "Skia archive contents:"
-          7z l "$archivePath"
-
           7z x "$archivePath" "-o$skiaRoot" -y
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Skia archive extraction failed."
+            throw "Skia extraction failed."
           }
 
-          # Some Skia archives contain a top-level skia directory.
           $nestedRoot = Join-Path $skiaRoot "skia"
-          $nestedInclude = Join-Path $nestedRoot "include"
-          $nestedOutput = Join-Path $nestedRoot "out"
 
           if (
-            (Test-Path -LiteralPath $nestedInclude) -and
-            (Test-Path -LiteralPath $nestedOutput)
+            (Test-Path -LiteralPath (Join-Path $nestedRoot "include")) -and
+            (Test-Path -LiteralPath (Join-Path $nestedRoot "out"))
           ) {
             Get-ChildItem `
               -LiteralPath $nestedRoot `
@@ -188,8 +172,6 @@ jobs:
           }
 
           Write-Host "Skia installation verified."
-          Get-Item `
-            -LiteralPath (Join-Path $skiaRoot "out\Release-x64\skia.lib")
 
       - name: Configure Aseprite
         shell: cmd
@@ -215,13 +197,10 @@ jobs:
             exit /b 1
           )
 
-          echo Using Visual Studio:
-          echo !VSINSTALL!
-
           call "!VSINSTALL!\Common7\Tools\VsDevCmd.bat" -arch=x64
 
           if errorlevel 1 (
-            echo Failed to initialize the Visual Studio developer environment.
+            echo Failed to initialize Visual Studio.
             exit /b 1
           )
 
@@ -236,21 +215,6 @@ jobs:
 
           where ninja
           if errorlevel 1 exit /b 1
-
-          if not exist "%GITHUB_WORKSPACE%\aseprite\CMakeLists.txt" (
-            echo Aseprite CMakeLists.txt was not found.
-            exit /b 1
-          )
-
-          if not exist "%GITHUB_WORKSPACE%\skia\include" (
-            echo Skia include directory was not found.
-            exit /b 1
-          )
-
-          if not exist "%GITHUB_WORKSPACE%\skia\out\Release-x64\skia.lib" (
-            echo Skia library was not found.
-            exit /b 1
-          )
 
           if exist "%GITHUB_WORKSPACE%\aseprite\build" (
             rmdir /s /q "%GITHUB_WORKSPACE%\aseprite\build"
@@ -273,27 +237,13 @@ jobs:
             --log-level=VERBOSE
 
           if errorlevel 1 (
-            echo.
             echo CMake configuration failed.
-
-            if exist "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles\CMakeError.log" (
-              echo.
-              echo ===== CMakeError.log =====
-              type "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles\CMakeError.log"
-            )
-
-            if exist "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles\CMakeOutput.log" (
-              echo.
-              echo ===== CMakeOutput.log =====
-              type "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles\CMakeOutput.log"
-            )
-
             exit /b 1
           )
 
           endlocal
 
-      - name: Upload CMake diagnostic logs
+      - name: Upload CMake diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -311,11 +261,6 @@ jobs:
 
           set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 
-          if not exist "%VSWHERE%" (
-            echo vswhere.exe was not found.
-            exit /b 1
-          )
-
           set "VSINSTALL="
 
           for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
@@ -330,7 +275,7 @@ jobs:
           call "!VSINSTALL!\Common7\Tools\VsDevCmd.bat" -arch=x64
 
           if errorlevel 1 (
-            echo Failed to initialize the Visual Studio developer environment.
+            echo Failed to initialize Visual Studio.
             exit /b 1
           )
 
@@ -347,7 +292,8 @@ jobs:
           if errorlevel 1 exit /b 1
 
           if not exist "%GITHUB_WORKSPACE%\aseprite\build\build.ninja" (
-            echo CMake build files were not generated.
+            echo build.ninja was not found.
+            echo CMake configuration did not generate a build system.
             exit /b 1
           )
 
@@ -363,27 +309,6 @@ jobs:
           )
 
           endlocal
-
-      - name: Create portable configuration
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $binDirectory = Join-Path $env:GITHUB_WORKSPACE "aseprite\build\bin"
-          $iniPath = Join-Path $binDirectory "aseprite.ini"
-
-          if (-not (Test-Path -LiteralPath $binDirectory)) {
-            throw "Aseprite bin directory was not created: $binDirectory"
-          }
-
-          Set-Content `
-            -LiteralPath $iniPath `
-            -Value "# Portable Aseprite configuration" `
-            -Encoding UTF8
-
-          if (-not (Test-Path -LiteralPath $iniPath)) {
-            throw "Portable configuration file was not created."
-          }
 
       - name: Verify executable
         shell: pwsh
@@ -401,74 +326,12 @@ jobs:
           Write-Host "Verified executable:"
           Write-Host $executable
 
-      - name: Create release archive
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $binDirectory = Join-Path `
-            $env:GITHUB_WORKSPACE `
-            "aseprite\build\bin"
-
-          $archiveName = "Aseprite-$env:ASEPRITE_TAG-Windows.zip"
-          $archivePath = Join-Path $binDirectory $archiveName
-          $stagingDirectory = Join-Path `
-            $env:RUNNER_TEMP `
-            "aseprite-release"
-
-          if (-not (Test-Path -LiteralPath $binDirectory)) {
-            throw "Aseprite bin directory was not found: $binDirectory"
-          }
-
-          if (Test-Path -LiteralPath $stagingDirectory) {
-            Remove-Item `
-              -LiteralPath $stagingDirectory `
-              -Recurse `
-              -Force
-          }
-
-          New-Item `
-            -ItemType Directory `
-            -Path $stagingDirectory `
-            -Force |
-            Out-Null
-
-          Get-ChildItem `
-            -LiteralPath $binDirectory `
-            -File |
-            Where-Object {
-              $_.Name -ne $archiveName
-            } |
-            Copy-Item `
-              -Destination $stagingDirectory `
-              -Force
-
-          if (Test-Path -LiteralPath $archivePath) {
-            Remove-Item `
-              -LiteralPath $archivePath `
-              -Force
-          }
-
-          7z a `
-            "$archivePath" `
-            "$stagingDirectory\*" `
-            -mx=5
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Release archive creation failed."
-          }
-
-          if (-not (Test-Path -LiteralPath $archivePath)) {
-            throw "Release archive was not created."
-          }
-
-          Write-Host "Created release archive:"
-          Write-Host $archivePath
-
-      - name: Upload Aseprite artifact
+      - name: Upload uncompressed build output
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Aseprite-Windows
-          path: aseprite/build/bin/Aseprite-${{ env.ASEPRITE_TAG }}-Windows.zip
-          if-no-files-found: error
+          name: Aseprite-build-output
+          path: |
+            aseprite/build/bin
+          if-no-files-found: warn
           compression-level: 0
