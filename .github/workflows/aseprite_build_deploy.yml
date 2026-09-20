@@ -14,7 +14,7 @@ env:
   BUILD_TYPE: Release
   NINJA_VERSION: "1.12.1"
 
-  # This Skia package must match the Aseprite source version being built.
+  # This must match the Aseprite source revision being built.
   SKIA_VERSION: "m81-b607b32047"
   SKIA_ARCHIVE: "Skia-Windows-Release-X64.zip"
 
@@ -55,6 +55,7 @@ jobs:
     name: Build Aseprite for Windows
     needs: check-version
     runs-on: windows-latest
+    timeout-minutes: 120
 
     steps:
       - name: Install Ninja
@@ -66,20 +67,55 @@ jobs:
           $zipPath = Join-Path $env:RUNNER_TEMP "ninja.zip"
           $url = "https://github.com/ninja-build/ninja/releases/download/v$env:NINJA_VERSION/ninja-win.zip"
 
-          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-          Invoke-WebRequest -Uri $url -OutFile $zipPath
-          Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+          if (Test-Path $installDir) {
+            Remove-Item $installDir -Recurse -Force
+          }
 
-          Add-Content -Path $env:GITHUB_PATH -Value $installDir
+          New-Item `
+            -ItemType Directory `
+            -Path $installDir `
+            -Force |
+            Out-Null
 
-          & (Join-Path $installDir "ninja.exe") --version
+          Write-Host "Downloading Ninja from $url"
+
+          curl.exe `
+            --fail `
+            --location `
+            --retry 5 `
+            --retry-delay 3 `
+            --connect-timeout 30 `
+            --max-time 300 `
+            --output "$zipPath" `
+            "$url"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Ninja download failed with exit code $LASTEXITCODE"
+          }
+
+          Expand-Archive `
+            -Path $zipPath `
+            -DestinationPath $installDir `
+            -Force
+
+          $ninja = Join-Path $installDir "ninja.exe"
+
+          if (-not (Test-Path $ninja)) {
+            throw "ninja.exe was not found after extraction."
+          }
+
+          Add-Content `
+            -Path $env:GITHUB_PATH `
+            -Value $installDir
+
+          & $ninja --version
 
       - name: Restore Skia cache
         id: skia_cache
         uses: actions/cache@v4
         with:
           path: skia
-          key: skia-windows-x64-${{ env.SKIA_VERSION }}-v2
+          key: skia-windows-x64-${{ env.SKIA_VERSION }}-v4
 
       - name: Download and verify Skia
         shell: pwsh
@@ -89,70 +125,93 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $skiaRoot = Join-Path $env:GITHUB_WORKSPACE "skia"
-          $skiaDependency = Join-Path $skiaRoot "third_party\externals\libjpeg-turbo"
-          $skiaLibraryDir = Join-Path $skiaRoot "out\Release-x64"
-          $skiaLibrary = Join-Path $skiaLibraryDir "skia.lib"
+          $archive = Join-Path $env:RUNNER_TEMP $env:SKIA_ARCHIVE
+          $url = "https://github.com/aseprite/skia/releases/download/$env:SKIA_VERSION/$env:SKIA_ARCHIVE"
 
           if ($env:SKIA_CACHE_HIT -ne "true") {
-            $archive = Join-Path $env:RUNNER_TEMP $env:SKIA_ARCHIVE
-            $downloadUrl = "https://github.com/aseprite/skia/releases/download/$env:SKIA_VERSION/$env:SKIA_ARCHIVE"
-
             if (Test-Path $skiaRoot) {
               Remove-Item $skiaRoot -Recurse -Force
             }
 
-            New-Item -ItemType Directory -Force -Path $skiaRoot | Out-Null
+            New-Item `
+              -ItemType Directory `
+              -Path $skiaRoot `
+              -Force |
+              Out-Null
 
-            Write-Host "Downloading Skia from $downloadUrl"
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $archive
+            Write-Host "Downloading Skia from $url"
 
-            7z x $archive "-o$skiaRoot" -y | Out-Null
+            curl.exe `
+              --fail `
+              --location `
+              --retry 5 `
+              --retry-delay 3 `
+              --connect-timeout 30 `
+              --max-time 900 `
+              --output "$archive" `
+              "$url"
 
-            # Some archives contain a single top-level directory.
-            $nestedSkia = Join-Path $skiaRoot "skia"
-
-            if (
-              (Test-Path (Join-Path $nestedSkia "include")) -and
-              (Test-Path (Join-Path $nestedSkia "out"))
-            ) {
-              Write-Host "Flattening nested Skia directory."
-              Get-ChildItem -LiteralPath $nestedSkia -Force |
-                Move-Item -Destination $skiaRoot -Force
-
-              Remove-Item $nestedSkia -Recurse -Force
+            if ($LASTEXITCODE -ne 0) {
+              throw "Skia download failed with exit code $LASTEXITCODE"
             }
+
+            if (-not (Test-Path $archive)) {
+              throw "Skia archive was not downloaded."
+            }
+
+            Write-Host "Skia archive contents:"
+            7z l "$archive"
+
+            7z x "$archive" "-o$skiaRoot" -y | Out-Null
           }
           else {
             Write-Host "Skia was restored from cache."
           }
 
+          $nestedRoot = Join-Path $skiaRoot "skia"
+
+          if (
+            (Test-Path (Join-Path $nestedRoot "include")) -and
+            (Test-Path (Join-Path $nestedRoot "out"))
+          ) {
+            Write-Host "Flattening nested Skia directory."
+
+            Get-ChildItem `
+              -LiteralPath $nestedRoot `
+              -Force |
+              Move-Item `
+                -Destination $skiaRoot `
+                -Force
+
+            Remove-Item $nestedRoot -Recurse -Force
+          }
+
           $requiredPaths = @(
-            $skiaRoot,
             (Join-Path $skiaRoot "include"),
+            (Join-Path $skiaRoot "out"),
+            (Join-Path $skiaRoot "out\Release-x64"),
+            (Join-Path $skiaRoot "out\Release-x64\skia.lib"),
             (Join-Path $skiaRoot "third_party"),
-            $skiaDependency,
-            $skiaLibraryDir,
-            $skiaLibrary
+            (Join-Path $skiaRoot "third_party\externals"),
+            (Join-Path $skiaRoot "third_party\externals\libjpeg-turbo")
           )
 
           foreach ($path in $requiredPaths) {
             if (-not (Test-Path $path)) {
-              Write-Host "Skia directory contents:"
-              if (Test-Path $skiaRoot) {
-                Get-ChildItem $skiaRoot -Recurse -Depth 3 |
-                  Select-Object FullName
-              }
+              Write-Host "Extracted Skia directory:"
+              Get-ChildItem `
+                -LiteralPath $skiaRoot `
+                -Recurse `
+                -Depth 5 |
+                Select-Object FullName
 
               throw "Required Skia path is missing: $path"
             }
           }
 
-          Write-Host "Skia verified successfully."
-          Write-Host "SKIA_DIR: $skiaRoot"
-          Write-Host "SKIA_LIBRARY_DIR: $skiaLibraryDir"
-          Write-Host "SKIA_LIBRARY: $skiaLibrary"
+          Write-Host "Skia installation verified."
 
-      - name: Checkout Aseprite source with submodules
+      - name: Checkout Aseprite source
         uses: actions/checkout@v4
         with:
           repository: aseprite/aseprite
@@ -168,16 +227,18 @@ jobs:
 
           $sourceRoot = Join-Path $env:GITHUB_WORKSPACE "aseprite"
 
-          if (-not (Test-Path (Join-Path $sourceRoot "CMakeLists.txt"))) {
-            throw "Aseprite CMakeLists.txt was not found."
-          }
+          $requiredFiles = @(
+            "CMakeLists.txt",
+            "laf\cmake\c_flag_overrides.cmake",
+            "laf\cmake\cxx_flag_overrides.cmake"
+          )
 
-          if (-not (Test-Path (Join-Path $sourceRoot "laf\cmake\c_flag_overrides.cmake"))) {
-            throw "The laf submodule was not checked out correctly."
-          }
+          foreach ($file in $requiredFiles) {
+            $path = Join-Path $sourceRoot $file
 
-          if (-not (Test-Path (Join-Path $sourceRoot "laf\cmake\cxx_flag_overrides.cmake"))) {
-            throw "The laf CMake files were not found."
+            if (-not (Test-Path $path)) {
+              throw "Required Aseprite file is missing: $path"
+            }
           }
 
           Write-Host "Aseprite source and submodules verified."
@@ -191,6 +252,8 @@ jobs:
             echo vswhere.exe was not found.
             exit /b 1
           )
+
+          set "VSINSTALL="
 
           for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
             set "VSINSTALL=%%i"
@@ -232,6 +295,11 @@ jobs:
             exit /b 1
           )
 
+          if not exist "%GITHUB_WORKSPACE%\aseprite\build\build.ninja" (
+            echo build.ninja was not created.
+            exit /b 1
+          )
+
       - name: Build Aseprite
         shell: cmd
         run: |
@@ -245,14 +313,16 @@ jobs:
             exit /b 1
           )
 
-      - name: Clean generated build files
+      - name: Clean generated files
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $binPath = Join-Path $env:GITHUB_WORKSPACE "aseprite\build\bin"
+          $binPath = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "aseprite\build\bin"
 
-          $filesToRemove = @(
+          $files = @(
             "gen",
             "gen.exe",
             "gen.exe.manifest",
@@ -261,7 +331,7 @@ jobs:
             "modp_b64_gen.exe.manifest"
           )
 
-          foreach ($file in $filesToRemove) {
+          foreach ($file in $files) {
             $path = Join-Path $binPath $file
 
             if (Test-Path $path) {
@@ -294,13 +364,16 @@ jobs:
 
           $tag = "${{ needs.check-version.outputs.latest_tag }}"
           $archiveName = "Aseprite-$tag-Windows.zip"
-          $archivePath = Join-Path $env:GITHUB_WORKSPACE "aseprite\build\bin\$archiveName"
+          $archivePath = "aseprite\build\bin\$archiveName"
 
           if (Test-Path $archivePath) {
             Remove-Item $archivePath -Force
           }
 
-          7z a $archivePath "aseprite\build\bin\*" | Out-Null
+          7z a `
+            $archivePath `
+            "aseprite\build\bin\*" |
+            Out-Null
 
           if (-not (Test-Path $archivePath)) {
             throw "Release archive was not created."
@@ -341,7 +414,10 @@ jobs:
           tag="${{ needs.check-version.outputs.latest_tag }}"
           archive="aseprite/build/bin/Aseprite-$tag-Windows.zip"
 
-          test -f "$archive"
+          if [ ! -f "$archive" ]; then
+            echo "Release archive not found: $archive"
+            exit 1
+          fi
 
           gh release upload "$tag" "$archive" \
             --repo "$GITHUB_REPOSITORY" \
