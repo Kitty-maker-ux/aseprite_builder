@@ -133,76 +133,39 @@ jobs:
 
           Write-Host "Skia installation verified."
 
-      - name: Download Aseprite source
+      - name: Checkout Aseprite source with submodules
+        uses: actions/checkout@v4
+        with:
+          repository: aseprite/aseprite
+          ref: ${{ needs.check-version.outputs.latest_tag }}
+          submodules: recursive
+          path: aseprite
+          fetch-depth: 1
+
+      - name: Verify Aseprite source
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $tag = "${{ needs.check-version.outputs.latest_tag }}"
-          $sourceUrl = "https://github.com/aseprite/aseprite/archive/refs/tags/$tag.zip"
-
-          $zipFile = Join-Path `
-            $env:RUNNER_TEMP `
-            "Aseprite-source.zip"
-
-          $extractDir = Join-Path `
-            $env:RUNNER_TEMP `
-            "aseprite-extracted"
-
-          $destinationDir = Join-Path `
-            $env:GITHUB_WORKSPACE `
-            "aseprite"
-
-          if (Test-Path $extractDir) {
-            Remove-Item `
-              $extractDir `
-              -Recurse `
-              -Force
-          }
-
-          if (Test-Path $destinationDir) {
-            Remove-Item `
-              $destinationDir `
-              -Recurse `
-              -Force
-          }
-
           New-Item `
             -ItemType Directory `
-            -Path $extractDir `
+            -Path "aseprite\build" `
             -Force |
             Out-Null
 
-          Invoke-WebRequest `
-            -Uri $sourceUrl `
-            -OutFile $zipFile
-
-          7z x `
-            $zipFile `
-            "-o$extractDir" `
-            -y |
-            Out-Null
-
-          $sourceDirectory = Get-ChildItem `
-            -Path $extractDir `
-            -Directory |
-            Select-Object -First 1
-
-          if ($null -eq $sourceDirectory) {
-            throw "Could not find the extracted Aseprite source directory."
+          if (-not (Test-Path "aseprite\CMakeLists.txt")) {
+            throw "Aseprite CMakeLists.txt was not found."
           }
 
-          Move-Item `
-            -Path $sourceDirectory.FullName `
-            -Destination $destinationDir
+          if (-not (Test-Path "aseprite\laf\cmake\c_flag_overrides.cmake")) {
+            throw "The laf submodule was not checked out correctly."
+          }
 
-          New-Item `
-            -ItemType Directory `
-            -Path "$destinationDir\build" `
-            -Force |
-            Out-Null
+          if (-not (Test-Path "aseprite\laf\cmake\cxx_flag_overrides.cmake")) {
+            throw "The laf CMake files were not found."
+          }
 
-          Write-Host "Aseprite source directory: $destinationDir"
+          Write-Host "Aseprite source and submodules verified."
 
       - name: Configure and build Aseprite
         shell: cmd
