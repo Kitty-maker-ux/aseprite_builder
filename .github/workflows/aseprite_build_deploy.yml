@@ -2,8 +2,10 @@ name: Build and deploy Aseprite
 
 on:
   workflow_dispatch:
+
   schedule:
     - cron: "0 0 * * *"
+
   push:
     branches:
       - master
@@ -89,11 +91,24 @@ jobs:
           $zipPath = "$env:RUNNER_TEMP\ninja.zip"
           $url = "https://github.com/ninja-build/ninja/releases/download/v${env:NINJA_VERSION}/ninja-win.zip"
 
-          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-          Invoke-WebRequest -Uri $url -OutFile $zipPath
-          Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $installDir |
+            Out-Null
 
-          Add-Content -Path $env:GITHUB_PATH -Value $installDir
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $zipPath
+
+          Expand-Archive `
+            -Path $zipPath `
+            -DestinationPath $installDir `
+            -Force
+
+          Add-Content `
+            -Path $env:GITHUB_PATH `
+            -Value $installDir
 
           & "$installDir\ninja.exe" --version
 
@@ -111,7 +126,8 @@ jobs:
 
       - name: macOS - Install dependencies
         if: matrix.os == 'macOS-latest'
-        run: brew install ninja p7zip
+        run: |
+          brew install ninja p7zip
 
       - name: Get Skia from cache
         id: skia_cache
@@ -129,8 +145,16 @@ jobs:
           $skiaFile = "Skia-${env:RUNNER_OS}-Release-X64.zip"
           $skiaUrl = "https://github.com/aseprite/skia/releases/download/m81-b607b32047/$skiaFile"
 
-          Invoke-WebRequest -Uri $skiaUrl -OutFile $skiaFile
-          New-Item -ItemType Directory -Force -Path skia | Out-Null
+          Invoke-WebRequest `
+            -Uri $skiaUrl `
+            -OutFile $skiaFile
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path skia |
+            Out-Null
+
           7z x $skiaFile "-oskia" -y
 
       - name: Download Aseprite source
@@ -141,14 +165,68 @@ jobs:
           $tag = "${{ needs.check-version.outputs.latest_tag }}"
           $sourceUrl = "https://github.com/aseprite/aseprite/archive/refs/tags/$tag.zip"
 
-          Invoke-WebRequest -Uri $sourceUrl -OutFile Aseprite-source.zip
-          7z x Aseprite-source.zip -oaseprite -y
+          $zipFile = Join-Path `
+            $env:RUNNER_TEMP `
+            "Aseprite-source.zip"
 
-          $sourceDirectory = Get-ChildItem -Path aseprite -Directory | Select-Object -First 1
-          Rename-Item $sourceDirectory.FullName "aseprite-source"
-          Rename-Item "aseprite-source" "aseprite"
+          $extractDir = Join-Path `
+            $env:RUNNER_TEMP `
+            "aseprite-extracted"
 
-          New-Item -ItemType Directory -Force -Path aseprite/build | Out-Null
+          $destinationDir = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "aseprite"
+
+          if (Test-Path $extractDir) {
+            Remove-Item `
+              $extractDir `
+              -Recurse `
+              -Force
+          }
+
+          if (Test-Path $destinationDir) {
+            Remove-Item `
+              $destinationDir `
+              -Recurse `
+              -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $extractDir `
+            -Force |
+            Out-Null
+
+          Invoke-WebRequest `
+            -Uri $sourceUrl `
+            -OutFile $zipFile
+
+          7z x `
+            $zipFile `
+            "-o$extractDir" `
+            -y |
+            Out-Null
+
+          $sourceDirectory = Get-ChildItem `
+            -Path $extractDir `
+            -Directory |
+            Select-Object -First 1
+
+          if ($null -eq $sourceDirectory) {
+            throw "Could not find the extracted Aseprite source directory."
+          }
+
+          Move-Item `
+            -Path $sourceDirectory.FullName `
+            -Destination $destinationDir
+
+          New-Item `
+            -ItemType Directory `
+            -Path "$destinationDir\build" `
+            -Force |
+            Out-Null
+
+          Write-Host "Aseprite source directory: $destinationDir"
 
       - name: Windows - Configure and build
         if: matrix.os == 'windows-latest'
@@ -181,7 +259,10 @@ jobs:
             -DSKIA_LIBRARY_DIR="$GITHUB_WORKSPACE/skia/out/Release-x64" \
             -G Ninja
 
-          cmake --build aseprite/build --target aseprite --config "$BUILD_TYPE"
+          cmake \
+            --build aseprite/build \
+            --target aseprite \
+            --config "$BUILD_TYPE"
 
       - name: macOS - Configure and build
         if: matrix.os == 'macOS-latest'
@@ -198,19 +279,34 @@ jobs:
             -DSKIA_LIBRARY_DIR="$GITHUB_WORKSPACE/skia/out/Release-x64" \
             -G Ninja
 
-          cmake --build aseprite/build --target aseprite --config "$BUILD_TYPE"
+          cmake \
+            --build aseprite/build \
+            --target aseprite \
+            --config "$BUILD_TYPE"
 
       - name: Clean build directory
         shell: pwsh
         run: |
           $binPath = "aseprite/build/bin"
 
-          Remove-Item "$binPath/gen" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$binPath/modp_b64_gen" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$binPath/gen.exe" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$binPath/gen.exe.manifest" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$binPath/modp_b64_gen.exe" -Force -ErrorAction SilentlyContinue
-          Remove-Item "$binPath/modp_b64_gen.exe.manifest" -Force -ErrorAction SilentlyContinue
+          $filesToRemove = @(
+            "gen",
+            "modp_b64_gen",
+            "gen.exe",
+            "gen.exe.manifest",
+            "modp_b64_gen.exe",
+            "modp_b64_gen.exe.manifest
+          )
+
+          foreach ($file in $filesToRemove) {
+            $filePath = Join-Path $binPath $file
+
+            if (Test-Path $filePath) {
+              Remove-Item `
+                $filePath `
+                -Force
+            }
+          }
 
       - name: Windows - Make portable
         if: matrix.os == 'windows-latest'
@@ -237,14 +333,15 @@ jobs:
         run: |
           tag="${{ needs.check-version.outputs.latest_tag }}"
 
+          cat > release-notes.md <<'EOF'
+          ${{ needs.check-version.outputs.version_info }}
+          EOF
+
           gh release create "$tag" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
             --title "Release Aseprite $tag" \
-            --notes-file <(cat <<'EOF'
-          ${{ needs.check-version.outputs.version_info }}
-          EOF
-          )
+            --notes-file release-notes.md
 
       - name: Upload release archive
         shell: bash
