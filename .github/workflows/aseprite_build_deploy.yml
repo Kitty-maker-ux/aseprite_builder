@@ -38,7 +38,11 @@ jobs:
           $zipPath = "$env:RUNNER_TEMP\ninja.zip"
           $url = "https://github.com/ninja-build/ninja/releases/download/v$env:NINJA_VERSION/ninja-win.zip"
 
-          New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+          New-Item `
+            -ItemType Directory `
+            -Path $installDir `
+            -Force |
+            Out-Null
 
           curl.exe `
             --fail `
@@ -69,7 +73,7 @@ jobs:
 
           & "$installDir\ninja.exe" --version
 
-      - name: Download Skia
+      - name: Download and verify Skia
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -79,7 +83,10 @@ jobs:
           $url = "https://github.com/aseprite/skia/releases/download/$env:SKIA_VERSION/$env:SKIA_ARCHIVE"
 
           if (Test-Path $skiaRoot) {
-            Remove-Item $skiaRoot -Recurse -Force
+            Remove-Item `
+              -Path $skiaRoot `
+              -Recurse `
+              -Force
           }
 
           New-Item `
@@ -117,26 +124,69 @@ jobs:
             (Test-Path "$nestedRoot\include") -and
             (Test-Path "$nestedRoot\out")
           ) {
-            Get-ChildItem "$nestedRoot" -Force |
-              Move-Item -Destination "$skiaRoot" -Force
+            Get-ChildItem `
+              -Path $nestedRoot `
+              -Force |
+              Move-Item `
+                -Destination $skiaRoot `
+                -Force
 
-            Remove-Item "$nestedRoot" -Recurse -Force
+            Remove-Item `
+              -Path $nestedRoot `
+              -Recurse `
+              -Force
           }
 
           $requiredPaths = @(
             "$skiaRoot\include",
             "$skiaRoot\out\Release-x64",
             "$skiaRoot\out\Release-x64\skia.lib",
-            "$skiaRoot\third_party\externals\libjpeg-turbo"
+            "$skiaRoot\third_party\externals"
           )
 
           foreach ($path in $requiredPaths) {
             if (-not (Test-Path $path)) {
-              throw "This Skia archive is incompatible with Aseprite. Missing: $path"
+              throw "Required Skia path is missing: $path"
             }
           }
 
-          Write-Host "Skia verified successfully."
+          Write-Host "Skia installation verified."
+
+      - name: Remove missing Skia include paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $skiaRoot = "$env:GITHUB_WORKSPACE\skia"
+          $missingPath = "$skiaRoot\third_party\externals\libjpeg-turbo"
+
+          $files = Get-ChildItem `
+            -Path $skiaRoot `
+            -Recurse `
+            -File `
+            -Include "*.cmake", "*.txt"
+
+          foreach ($file in $files) {
+            $content = Get-Content `
+              -Path $file.FullName `
+              -Raw
+
+            if ($content.Contains($missingPath)) {
+              Write-Host "Removing missing path from $($file.FullName)"
+
+              $content = $content.Replace(
+                $missingPath,
+                ""
+              )
+
+              Set-Content `
+                -Path $file.FullName `
+                -Value $content `
+                -NoNewline
+            }
+          }
+
+          Write-Host "Finished cleaning missing Skia include paths."
 
       - name: Checkout Aseprite
         uses: actions/checkout@v4
