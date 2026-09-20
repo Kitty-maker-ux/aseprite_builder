@@ -2,6 +2,12 @@ name: Build and deploy Aseprite
 
 on:
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Build even if this Aseprite version is already cached"
+        required: false
+        default: false
+        type: boolean
 
   schedule:
     - cron: "0 0 * * *"
@@ -59,9 +65,16 @@ jobs:
         id: should_build
         shell: bash
         run: |
-          if [[ "${{ steps.version_check.outputs.cache-hit }}" == "true" ]]; then
+          force_build="${{ inputs.force_build }}"
+
+          if [[ "$force_build" == "true" ]]; then
+            echo "A forced build was requested."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+
+          elif [[ "${{ steps.version_check.outputs.cache-hit }}" == "true" ]]; then
             echo "Aseprite ${{ steps.version_info.outputs.latest_tag }} was already built."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
+
           else
             echo "A new Aseprite release was found."
             echo "${{ steps.version_info.outputs.latest_tag }}" > latest-version.txt
