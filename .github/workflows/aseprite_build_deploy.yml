@@ -193,6 +193,7 @@ jobs:
         with:
           repository: aseprite/aseprite
           ref: ${{ env.ASEPRITE_TAG }}
+          path: aseprite
           submodules: recursive
           fetch-depth: 1
 
@@ -224,6 +225,13 @@ jobs:
           where cl || exit /b 1
           where cmake || exit /b 1
           where ninja || exit /b 1
+
+          if not exist "%GITHUB_WORKSPACE%\aseprite\CMakeLists.txt" (
+            echo Aseprite CMakeLists.txt was not found.
+            echo Expected source directory:
+            echo %GITHUB_WORKSPACE%\aseprite
+            exit /b 1
+          )
 
           if exist "%GITHUB_WORKSPACE%\aseprite\build" (
             rmdir /s /q "%GITHUB_WORKSPACE%\aseprite\build"
@@ -261,31 +269,84 @@ jobs:
       - name: Create portable configuration
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
+          $iniPath = "aseprite\build\bin\aseprite.ini"
+
           Set-Content `
-            -Path "aseprite\build\bin\aseprite.ini" `
+            -Path $iniPath `
             -Value "# Portable Aseprite configuration"
+
+          if (-not (Test-Path $iniPath)) {
+            throw "Portable configuration file was not created."
+          }
 
       - name: Verify executable
         shell: pwsh
         run: |
-          if (-not (Test-Path "aseprite\build\bin\aseprite.exe")) {
+          $ErrorActionPreference = "Stop"
+
+          $executable = "aseprite\build\bin\aseprite.exe"
+
+          if (-not (Test-Path $executable)) {
             throw "Aseprite executable was not created."
           }
+
+          Write-Host "Verified: $executable"
 
       - name: Create archive
         shell: pwsh
         run: |
-          $archive = "Aseprite-$env:ASEPRITE_TAG-Windows.zip"
-          $path = "aseprite\build\bin\$archive"
+          $ErrorActionPreference = "Stop"
 
-          7z a "$path" "aseprite\build\bin\*" | Out-Null
+          $binDirectory = "aseprite\build\bin"
+          $archiveName = "Aseprite-$env:ASEPRITE_TAG-Windows.zip"
+          $archivePath = Join-Path $binDirectory $archiveName
+          $stagingDirectory = "$env:RUNNER_TEMP\aseprite-release"
 
-          if (-not (Test-Path $path)) {
+          if (Test-Path $stagingDirectory) {
+            Remove-Item `
+              -Path $stagingDirectory `
+              -Recurse `
+              -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $stagingDirectory `
+            -Force |
+            Out-Null
+
+          Get-ChildItem `
+            -Path $binDirectory `
+            -File |
+            Where-Object {
+              $_.Name -ne $archiveName
+            } |
+            Copy-Item `
+              -Destination $stagingDirectory `
+              -Force
+
+          if (Test-Path $archivePath) {
+            Remove-Item `
+              -Path $archivePath `
+              -Force
+          }
+
+          7z a `
+            "$archivePath" `
+            "$stagingDirectory\*" |
+            Out-Null
+
+          if (-not (Test-Path $archivePath)) {
             throw "Release archive was not created."
           }
+
+          Write-Host "Created release archive: $archivePath"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Aseprite-Windows
           path: aseprite/build/bin/Aseprite-${{ env.ASEPRITE_TAG }}-Windows.zip
+          if-no-files-found: error
