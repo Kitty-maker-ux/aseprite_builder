@@ -14,7 +14,8 @@ env:
   BUILD_TYPE: Release
   NINJA_VERSION: "1.12.1"
 
-  # This must match the Aseprite source revision being built.
+  # These versions must remain compatible.
+  ASEPRITE_TAG: "v1.2.40"
   SKIA_VERSION: "m81-b607b32047"
   SKIA_ARCHIVE: "Skia-Windows-Release-X64.zip"
 
@@ -22,38 +23,8 @@ permissions:
   contents: write
 
 jobs:
-  check-version:
-    name: Check latest Aseprite release
-    runs-on: ubuntu-latest
-
-    outputs:
-      latest_tag: ${{ steps.version_info.outputs.latest_tag }}
-      version_info: ${{ steps.version_info.outputs.version_info }}
-
-    steps:
-      - name: Get latest Aseprite release information
-        id: version_info
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          data="$(curl -fsSL \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/aseprite/aseprite/releases/latest")"
-
-          latest_tag="$(jq -r '.tag_name' <<< "$data")"
-          version_info="$(jq -r '.body // ""' <<< "$data")"
-
-          {
-            echo "latest_tag=$latest_tag"
-            echo "version_info<<EOF"
-            echo "$version_info"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
   build-aseprite:
     name: Build Aseprite for Windows
-    needs: check-version
     runs-on: windows-latest
     timeout-minutes: 120
 
@@ -63,21 +34,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $installDir = Join-Path $env:RUNNER_TEMP "ninja"
-          $zipPath = Join-Path $env:RUNNER_TEMP "ninja.zip"
+          $installDir = "$env:RUNNER_TEMP\ninja"
+          $zipPath = "$env:RUNNER_TEMP\ninja.zip"
           $url = "https://github.com/ninja-build/ninja/releases/download/v$env:NINJA_VERSION/ninja-win.zip"
 
-          if (Test-Path $installDir) {
-            Remove-Item $installDir -Recurse -Force
-          }
-
-          New-Item `
-            -ItemType Directory `
-            -Path $installDir `
-            -Force |
-            Out-Null
-
-          Write-Host "Downloading Ninja from $url"
+          New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 
           curl.exe `
             --fail `
@@ -90,7 +51,7 @@ jobs:
             "$url"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Ninja download failed with exit code $LASTEXITCODE"
+            throw "Ninja download failed."
           }
 
           Expand-Archive `
@@ -98,150 +59,92 @@ jobs:
             -DestinationPath $installDir `
             -Force
 
-          $ninja = Join-Path $installDir "ninja.exe"
-
-          if (-not (Test-Path $ninja)) {
-            throw "ninja.exe was not found after extraction."
+          if (-not (Test-Path "$installDir\ninja.exe")) {
+            throw "ninja.exe was not found."
           }
 
           Add-Content `
             -Path $env:GITHUB_PATH `
             -Value $installDir
 
-          & $ninja --version
+          & "$installDir\ninja.exe" --version
 
-      - name: Restore Skia cache
-        id: skia_cache
-        uses: actions/cache@v4
-        with:
-          path: skia
-          key: skia-windows-x64-${{ env.SKIA_VERSION }}-v4
-
-      - name: Download and verify Skia
+      - name: Download Skia
         shell: pwsh
-        env:
-          SKIA_CACHE_HIT: ${{ steps.skia_cache.outputs.cache-hit }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $skiaRoot = Join-Path $env:GITHUB_WORKSPACE "skia"
-          $archive = Join-Path $env:RUNNER_TEMP $env:SKIA_ARCHIVE
+          $skiaRoot = "$env:GITHUB_WORKSPACE\skia"
+          $archive = "$env:RUNNER_TEMP\$env:SKIA_ARCHIVE"
           $url = "https://github.com/aseprite/skia/releases/download/$env:SKIA_VERSION/$env:SKIA_ARCHIVE"
 
-          if ($env:SKIA_CACHE_HIT -ne "true") {
-            if (Test-Path $skiaRoot) {
-              Remove-Item $skiaRoot -Recurse -Force
-            }
-
-            New-Item `
-              -ItemType Directory `
-              -Path $skiaRoot `
-              -Force |
-              Out-Null
-
-            Write-Host "Downloading Skia from $url"
-
-            curl.exe `
-              --fail `
-              --location `
-              --retry 5 `
-              --retry-delay 3 `
-              --connect-timeout 30 `
-              --max-time 900 `
-              --output "$archive" `
-              "$url"
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "Skia download failed with exit code $LASTEXITCODE"
-            }
-
-            if (-not (Test-Path $archive)) {
-              throw "Skia archive was not downloaded."
-            }
-
-            Write-Host "Skia archive contents:"
-            7z l "$archive"
-
-            7z x "$archive" "-o$skiaRoot" -y | Out-Null
-          }
-          else {
-            Write-Host "Skia was restored from cache."
+          if (Test-Path $skiaRoot) {
+            Remove-Item $skiaRoot -Recurse -Force
           }
 
-          $nestedRoot = Join-Path $skiaRoot "skia"
+          New-Item `
+            -ItemType Directory `
+            -Path $skiaRoot `
+            -Force |
+            Out-Null
+
+          Write-Host "Downloading Skia from:"
+          Write-Host $url
+
+          curl.exe `
+            --fail `
+            --location `
+            --retry 5 `
+            --retry-delay 3 `
+            --connect-timeout 30 `
+            --max-time 900 `
+            --output "$archive" `
+            "$url"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Skia download failed."
+          }
+
+          Write-Host "Skia archive contents:"
+          7z l "$archive"
+
+          7z x "$archive" "-o$skiaRoot" -y | Out-Null
+
+          # Handle archives containing a nested skia directory.
+          $nestedRoot = "$skiaRoot\skia"
 
           if (
-            (Test-Path (Join-Path $nestedRoot "include")) -and
-            (Test-Path (Join-Path $nestedRoot "out"))
+            (Test-Path "$nestedRoot\include") -and
+            (Test-Path "$nestedRoot\out")
           ) {
-            Write-Host "Flattening nested Skia directory."
+            Get-ChildItem "$nestedRoot" -Force |
+              Move-Item -Destination "$skiaRoot" -Force
 
-            Get-ChildItem `
-              -LiteralPath $nestedRoot `
-              -Force |
-              Move-Item `
-                -Destination $skiaRoot `
-                -Force
-
-            Remove-Item $nestedRoot -Recurse -Force
+            Remove-Item "$nestedRoot" -Recurse -Force
           }
 
           $requiredPaths = @(
-            (Join-Path $skiaRoot "include"),
-            (Join-Path $skiaRoot "out"),
-            (Join-Path $skiaRoot "out\Release-x64"),
-            (Join-Path $skiaRoot "out\Release-x64\skia.lib"),
-            (Join-Path $skiaRoot "third_party"),
-            (Join-Path $skiaRoot "third_party\externals"),
-            (Join-Path $skiaRoot "third_party\externals\libjpeg-turbo")
+            "$skiaRoot\include",
+            "$skiaRoot\out\Release-x64",
+            "$skiaRoot\out\Release-x64\skia.lib",
+            "$skiaRoot\third_party\externals\libjpeg-turbo"
           )
 
           foreach ($path in $requiredPaths) {
             if (-not (Test-Path $path)) {
-              Write-Host "Extracted Skia directory:"
-              Get-ChildItem `
-                -LiteralPath $skiaRoot `
-                -Recurse `
-                -Depth 5 |
-                Select-Object FullName
-
-              throw "Required Skia path is missing: $path"
+              throw "This Skia archive is incompatible with Aseprite. Missing: $path"
             }
           }
 
-          Write-Host "Skia installation verified."
+          Write-Host "Skia verified successfully."
 
-      - name: Checkout Aseprite source
+      - name: Checkout Aseprite
         uses: actions/checkout@v4
         with:
           repository: aseprite/aseprite
-          ref: ${{ needs.check-version.outputs.latest_tag }}
+          ref: ${{ env.ASEPRITE_TAG }}
           submodules: recursive
-          path: aseprite
           fetch-depth: 1
-
-      - name: Verify Aseprite source
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $sourceRoot = Join-Path $env:GITHUB_WORKSPACE "aseprite"
-
-          $requiredFiles = @(
-            "CMakeLists.txt",
-            "laf\cmake\c_flag_overrides.cmake",
-            "laf\cmake\cxx_flag_overrides.cmake"
-          )
-
-          foreach ($file in $requiredFiles) {
-            $path = Join-Path $sourceRoot $file
-
-            if (-not (Test-Path $path)) {
-              throw "Required Aseprite file is missing: $path"
-            }
-          }
-
-          Write-Host "Aseprite source and submodules verified."
 
       - name: Configure Aseprite
         shell: cmd
@@ -266,10 +169,7 @@ jobs:
 
           call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64
 
-          if errorlevel 1 (
-            echo Failed to initialize the Visual Studio environment.
-            exit /b 1
-          )
+          if errorlevel 1 exit /b 1
 
           where cl || exit /b 1
           where cmake || exit /b 1
@@ -295,11 +195,6 @@ jobs:
             exit /b 1
           )
 
-          if not exist "%GITHUB_WORKSPACE%\aseprite\build\build.ninja" (
-            echo build.ninja was not created.
-            exit /b 1
-          )
-
       - name: Build Aseprite
         shell: cmd
         run: |
@@ -313,112 +208,34 @@ jobs:
             exit /b 1
           )
 
-      - name: Clean generated files
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $binPath = Join-Path `
-            $env:GITHUB_WORKSPACE `
-            "aseprite\build\bin"
-
-          $files = @(
-            "gen",
-            "gen.exe",
-            "gen.exe.manifest",
-            "modp_b64_gen",
-            "modp_b64_gen.exe",
-            "modp_b64_gen.exe.manifest"
-          )
-
-          foreach ($file in $files) {
-            $path = Join-Path $binPath $file
-
-            if (Test-Path $path) {
-              Remove-Item $path -Force
-            }
-          }
-
-      - name: Make Aseprite portable
+      - name: Create portable configuration
         shell: pwsh
         run: |
           Set-Content `
             -Path "aseprite\build\bin\aseprite.ini" `
-            -Value "# This file is here so Aseprite behaves as a portable program"
+            -Value "# Portable Aseprite configuration"
 
-      - name: Verify build output
+      - name: Verify executable
         shell: pwsh
         run: |
-          $executable = "aseprite\build\bin\aseprite.exe"
-
-          if (-not (Test-Path $executable)) {
-            throw "Aseprite executable was not found at $executable"
+          if (-not (Test-Path "aseprite\build\bin\aseprite.exe")) {
+            throw "Aseprite executable was not created."
           }
 
-          Write-Host "Build output verified: $executable"
-
-      - name: Create release archive
+      - name: Create archive
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $archive = "Aseprite-$env:ASEPRITE_TAG-Windows.zip"
+          $path = "aseprite\build\bin\$archive"
 
-          $tag = "${{ needs.check-version.outputs.latest_tag }}"
-          $archiveName = "Aseprite-$tag-Windows.zip"
-          $archivePath = "aseprite\build\bin\$archiveName"
+          7z a "$path" "aseprite\build\bin\*" | Out-Null
 
-          if (Test-Path $archivePath) {
-            Remove-Item $archivePath -Force
-          }
-
-          7z a `
-            $archivePath `
-            "aseprite\build\bin\*" |
-            Out-Null
-
-          if (-not (Test-Path $archivePath)) {
+          if (-not (Test-Path $path)) {
             throw "Release archive was not created."
           }
 
-          Write-Host "Created release archive: $archivePath"
-
-      - name: Create draft GitHub release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          tag="${{ needs.check-version.outputs.latest_tag }}"
-
-          cat > release-notes.md <<'EOF'
-          ${{ needs.check-version.outputs.version_info }}
-          EOF
-
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $tag already exists."
-          else
-            gh release create "$tag" \
-              --repo "$GITHUB_REPOSITORY" \
-              --draft \
-              --title "Release Aseprite $tag" \
-              --notes-file release-notes.md
-          fi
-
-      - name: Upload release archive
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          tag="${{ needs.check-version.outputs.latest_tag }}"
-          archive="aseprite/build/bin/Aseprite-$tag-Windows.zip"
-
-          if [ ! -f "$archive" ]; then
-            echo "Release archive not found: $archive"
-            exit 1
-          fi
-
-          gh release upload "$tag" "$archive" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aseprite-Windows
+          path: aseprite/build/bin/Aseprite-${{ env.ASEPRITE_TAG }}-Windows.zip
