@@ -90,7 +90,7 @@ jobs:
           path: skia
           key: skia-windows-m81-b607b32047
 
-      - name: Download Skia
+      - name: Download and verify Skia
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -98,26 +98,40 @@ jobs:
           $skiaFile = "Skia-Windows-Release-X64.zip"
           $skiaUrl = "https://github.com/aseprite/skia/releases/download/m81-b607b32047/$skiaFile"
 
-          New-Item `
-            -ItemType Directory `
-            -Force `
-            -Path skia |
-            Out-Null
-
           if ("${{ steps.skia_cache.outputs.cache-hit }}" -eq "true") {
             Write-Host "Skia was restored from cache."
-            exit 0
+          }
+          else {
+            Invoke-WebRequest `
+              -Uri $skiaUrl `
+              -OutFile $skiaFile
+
+            New-Item `
+              -ItemType Directory `
+              -Force `
+              -Path skia |
+              Out-Null
+
+            7z x `
+              $skiaFile `
+              "-oskia" `
+              -y |
+              Out-Null
           }
 
-          Invoke-WebRequest `
-            -Uri $skiaUrl `
-            -OutFile $skiaFile
+          if (-not (Test-Path "skia")) {
+            throw "The Skia directory was not found."
+          }
 
-          7z x `
-            $skiaFile `
-            "-oskia" `
-            -y |
-            Out-Null
+          if (-not (Test-Path "skia\out\Release-x64")) {
+            throw "The Skia library directory was not found: skia\out\Release-x64"
+          }
+
+          if (-not (Test-Path "skia\include")) {
+            throw "The Skia include directory was not found: skia\include"
+          }
+
+          Write-Host "Skia installation verified."
 
       - name: Download Aseprite source
         shell: pwsh
@@ -195,22 +209,43 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
 
-          cd aseprite\build
+          if errorlevel 1 (
+            echo Failed to initialize the Visual Studio developer environment.
+            exit /b 1
+          )
 
           cmake ^
+            -S "%GITHUB_WORKSPACE%\aseprite" ^
+            -B "%GITHUB_WORKSPACE%\aseprite\build" ^
+            -G Ninja ^
             -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
             -DCMAKE_IGNORE_PATH="C:/ProgramData/chocolatey/bin/;C:/Strawberry/c/bin/" ^
             -DLAF_BACKEND=skia ^
-            -DSKIA_DIR=../../skia ^
-            -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 ^
-            -G Ninja ..
+            -DSKIA_DIR="%GITHUB_WORKSPACE%\skia" ^
+            -DSKIA_LIBRARY_DIR="%GITHUB_WORKSPACE%\skia\out\Release-x64"
 
-          ninja aseprite
+          if errorlevel 1 (
+            echo CMake configuration failed.
+            exit /b 1
+          )
+
+          cmake ^
+            --build "%GITHUB_WORKSPACE%\aseprite\build" ^
+            --target aseprite ^
+            --config %BUILD_TYPE% ^
+            --parallel
+
+          if errorlevel 1 (
+            echo Aseprite build failed.
+            exit /b 1
+          )
 
       - name: Clean build directory
         shell: pwsh
         run: |
-          $binPath = "aseprite/build/bin"
+          $ErrorActionPreference = "Stop"
+
+          $binPath = "aseprite\build\bin"
 
           $filesToRemove = @(
             "gen",
@@ -231,24 +266,45 @@ jobs:
             }
           }
 
-      - name: Make portable
+      - name: Make Aseprite portable
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Set-Content `
-            -Path "aseprite/build/bin/aseprite.ini" `
+            -Path "aseprite\build\bin\aseprite.ini" `
             -Value "# This file is here so Aseprite behaves as a portable program"
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $asepriteExecutable = "aseprite\build\bin\aseprite.exe"
+
+          if (-not (Test-Path $asepriteExecutable)) {
+            throw "Aseprite executable was not found at $asepriteExecutable"
+          }
+
+          Write-Host "Build output verified: $asepriteExecutable"
 
       - name: Create release archive
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           $tag = "${{ needs.check-version.outputs.latest_tag }}"
           $archive = "Aseprite-$tag-Windows.zip"
 
           7z a `
-            "aseprite/build/bin/$archive" `
-            "aseprite/build/bin/*"
+            "aseprite\build\bin\$archive" `
+            "aseprite\build\bin\*"
 
-      - name: Create or update draft GitHub release
+          if (-not (Test-Path "aseprite\build\bin\$archive")) {
+            throw "Release archive was not created."
+          }
+
+      - name: Create draft GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -280,6 +336,11 @@ jobs:
 
           tag="${{ needs.check-version.outputs.latest_tag }}"
           archive="aseprite/build/bin/Aseprite-$tag-Windows.zip"
+
+          if [ ! -f "$archive" ]; then
+            echo "Release archive not found: $archive"
+            exit 1
+          fi
 
           gh release upload "$tag" "$archive" \
             --repo "$GITHUB_REPOSITORY" \
