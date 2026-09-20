@@ -63,7 +63,7 @@ jobs:
             -DestinationPath $installDir `
             -Force
 
-          if (-not (Test-Path "$installDir\ninja.exe")) {
+          if (-not (Test-Path -LiteralPath "$installDir\ninja.exe")) {
             throw "ninja.exe was not found."
           }
 
@@ -73,18 +73,46 @@ jobs:
 
           & "$installDir\ninja.exe" --version
 
+      - name: Checkout Aseprite
+        uses: actions/checkout@v4
+        with:
+          repository: aseprite/aseprite
+          ref: ${{ env.ASEPRITE_TAG }}
+          path: aseprite
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Verify source tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $sourceDir = Join-Path $env:GITHUB_WORKSPACE "aseprite"
+          $cmakeFile = Join-Path $sourceDir "CMakeLists.txt"
+
+          if (-not (Test-Path -LiteralPath $sourceDir)) {
+            throw "Aseprite source directory was not found: $sourceDir"
+          }
+
+          if (-not (Test-Path -LiteralPath $cmakeFile)) {
+            throw "Aseprite CMakeLists.txt was not found: $cmakeFile"
+          }
+
+          Write-Host "Aseprite source directory verified:"
+          Write-Host $sourceDir
+
       - name: Download and verify Skia
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $skiaRoot = "$env:GITHUB_WORKSPACE\skia"
-          $archive = "$env:RUNNER_TEMP\$env:SKIA_ARCHIVE"
+          $skiaRoot = Join-Path $env:GITHUB_WORKSPACE "skia"
+          $archive = Join-Path $env:RUNNER_TEMP $env:SKIA_ARCHIVE
           $url = "https://github.com/aseprite/skia/releases/download/$env:SKIA_VERSION/$env:SKIA_ARCHIVE"
 
-          if (Test-Path $skiaRoot) {
+          if (Test-Path -LiteralPath $skiaRoot) {
             Remove-Item `
-              -Path $skiaRoot `
+              -LiteralPath $skiaRoot `
               -Recurse `
               -Force
           }
@@ -112,113 +140,64 @@ jobs:
             throw "Skia download failed."
           }
 
+          if (-not (Test-Path -LiteralPath $archive)) {
+            throw "Skia archive was not downloaded."
+          }
+
           Write-Host "Skia archive contents:"
           7z l "$archive"
 
-          7z x "$archive" "-o$skiaRoot" -y | Out-Null
+          7z x "$archive" "-o$skiaRoot" -y
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Skia archive extraction failed."
+          }
 
           # Handle archives containing a nested skia directory.
-          $nestedRoot = "$skiaRoot\skia"
+          $nestedRoot = Join-Path $skiaRoot "skia"
+          $nestedInclude = Join-Path $nestedRoot "include"
+          $nestedOutput = Join-Path $nestedRoot "out"
 
           if (
-            (Test-Path "$nestedRoot\include") -and
-            (Test-Path "$nestedRoot\out")
+            (Test-Path -LiteralPath $nestedInclude) -and
+            (Test-Path -LiteralPath $nestedOutput)
           ) {
             Get-ChildItem `
-              -Path $nestedRoot `
+              -LiteralPath $nestedRoot `
               -Force |
               Move-Item `
                 -Destination $skiaRoot `
                 -Force
 
             Remove-Item `
-              -Path $nestedRoot `
+              -LiteralPath $nestedRoot `
               -Recurse `
               -Force
           }
 
           $requiredPaths = @(
-            "$skiaRoot\include",
-            "$skiaRoot\out\Release-x64",
-            "$skiaRoot\out\Release-x64\skia.lib",
-            "$skiaRoot\third_party\externals"
+            (Join-Path $skiaRoot "include"),
+            (Join-Path $skiaRoot "out\Release-x64"),
+            (Join-Path $skiaRoot "out\Release-x64\skia.lib"),
+            (Join-Path $skiaRoot "third_party\externals")
           )
 
-          foreach ($path in $requiredPaths) {
-            if (-not (Test-Path $path)) {
-              throw "Required Skia path is missing: $path"
+          foreach ($requiredPath in $requiredPaths) {
+            if (-not (Test-Path -LiteralPath $requiredPath)) {
+              throw "Required Skia path is missing: $requiredPath"
             }
           }
 
           Write-Host "Skia installation verified."
-
-      - name: Remove missing Skia include paths
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $skiaRoot = "$env:GITHUB_WORKSPACE\skia"
-          $missingPath = "$skiaRoot\third_party\externals\libjpeg-turbo"
-
-          $files = Get-ChildItem `
-            -Path $skiaRoot `
-            -Recurse `
-            -File `
-            -Include "*.cmake", "*.txt"
-
-          foreach ($file in $files) {
-            $content = Get-Content `
-              -Path $file.FullName `
-              -Raw
-
-            if ($content.Contains($missingPath)) {
-              Write-Host "Removing missing path from $($file.FullName)"
-
-              $content = $content.Replace(
-                $missingPath,
-                ""
-              )
-
-              Set-Content `
-                -Path $file.FullName `
-                -Value $content `
-                -NoNewline
-            }
-          }
-
-          Write-Host "Finished cleaning missing Skia include paths."
-
-      - name: Checkout Aseprite
-        uses: actions/checkout@v4
-        with:
-          repository: aseprite/aseprite
-          ref: ${{ env.ASEPRITE_TAG }}
-          path: aseprite
-          submodules: recursive
-          fetch-depth: 1
-
-      - name: Verify source tree
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $sourceDir = "$env:GITHUB_WORKSPACE\aseprite"
-          $cmakeFile = "$sourceDir\CMakeLists.txt"
-
-          if (-not (Test-Path $sourceDir)) {
-            throw "Aseprite source directory was not found: $sourceDir"
-          }
-
-          if (-not (Test-Path $cmakeFile)) {
-            throw "Aseprite CMakeLists.txt was not found: $cmakeFile"
-          }
-
-          Write-Host "Aseprite source directory verified:"
-          Write-Host $sourceDir
+          Get-Item `
+            -LiteralPath (Join-Path $skiaRoot "out\Release-x64\skia.lib")
 
       - name: Configure Aseprite
         shell: cmd
         run: |
+          @echo on
+          setlocal EnableExtensions EnableDelayedExpansion
+
           set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 
           if not exist "%VSWHERE%" (
@@ -237,7 +216,10 @@ jobs:
             exit /b 1
           )
 
-          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64
+          echo Using Visual Studio installation:
+          echo !VSINSTALL!
+
+          call "!VSINSTALL!\Common7\Tools\VsDevCmd.bat" -arch=x64
 
           if errorlevel 1 (
             echo Failed to initialize the Visual Studio developer environment.
@@ -245,6 +227,9 @@ jobs:
           )
 
           where cl
+          if errorlevel 1 exit /b 1
+
+          where link
           if errorlevel 1 exit /b 1
 
           where cmake
@@ -255,8 +240,16 @@ jobs:
 
           if not exist "%GITHUB_WORKSPACE%\aseprite\CMakeLists.txt" (
             echo Aseprite CMakeLists.txt was not found.
-            echo Expected source directory:
-            echo %GITHUB_WORKSPACE%\aseprite
+            exit /b 1
+          )
+
+          if not exist "%GITHUB_WORKSPACE%\skia\include" (
+            echo Skia include directory was not found.
+            exit /b 1
+          )
+
+          if not exist "%GITHUB_WORKSPACE%\skia\out\Release-x64\skia.lib" (
+            echo Skia library was not found.
             exit /b 1
           )
 
@@ -268,23 +261,36 @@ jobs:
             -S "%GITHUB_WORKSPACE%\aseprite" ^
             -B "%GITHUB_WORKSPACE%\aseprite\build" ^
             -G Ninja ^
-            -Wno-deprecated ^
-            -Wno-dev ^
-            --log-level=VERBOSE ^
-            -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
+            -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ^
             -DLAF_BACKEND=skia ^
             -DENABLE_CCACHE=OFF ^
             -DSKIA_DIR="%GITHUB_WORKSPACE%\skia" ^
             -DSKIA_LIBRARY_DIR="%GITHUB_WORKSPACE%\skia\out\Release-x64" ^
-            -DSKIA_LIBRARY="%GITHUB_WORKSPACE%\skia\out\Release-x64\skia.lib"
+            -DSKIA_LIBRARY="%GITHUB_WORKSPACE%\skia\out\Release-x64\skia.lib" ^
+            -Wno-dev ^
+            --log-level=VERBOSE
 
           if errorlevel 1 (
             echo.
             echo CMake configuration failed.
-            echo Review the CMake error messages above.
+
+            if exist "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles\CMakeError.log" (
+              echo.
+              echo ===== CMakeError.log =====
+              type "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles\CMakeError.log"
+            )
+
+            if exist "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles\CMakeOutput.log" (
+              echo.
+              echo ===== CMakeOutput.log =====
+              type "%GITHUB_WORKSPACE%\aseprite\build\CMakeFiles\CMakeOutput.log"
+            )
+
             exit /b 1
           )
+
+          endlocal
 
       - name: Upload CMake diagnostic logs
         if: always()
@@ -292,35 +298,90 @@ jobs:
         with:
           name: cmake-diagnostics
           path: |
-            aseprite/build/CMakeFiles/CMakeError.log
-            aseprite/build/CMakeFiles/CMakeOutput.log
+            aseprite/build
+            skia
           if-no-files-found: warn
+          compression-level: 6
 
       - name: Build Aseprite
         shell: cmd
         run: |
+          @echo on
+          setlocal EnableExtensions EnableDelayedExpansion
+
+          set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          if not exist "%VSWHERE%" (
+            echo vswhere.exe was not found.
+            exit /b 1
+          )
+
+          set "VSINSTALL="
+
+          for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+            set "VSINSTALL=%%i"
+          )
+
+          if not defined VSINSTALL (
+            echo Visual Studio C++ tools were not found.
+            exit /b 1
+          )
+
+          call "!VSINSTALL!\Common7\Tools\VsDevCmd.bat" -arch=x64
+
+          if errorlevel 1 (
+            echo Failed to initialize the Visual Studio developer environment.
+            exit /b 1
+          )
+
+          where cl
+          if errorlevel 1 exit /b 1
+
+          where link
+          if errorlevel 1 exit /b 1
+
+          where cmake
+          if errorlevel 1 exit /b 1
+
+          where ninja
+          if errorlevel 1 exit /b 1
+
+          if not exist "%GITHUB_WORKSPACE%\aseprite\build\build.ninja" (
+            echo CMake build files were not generated.
+            exit /b 1
+          )
+
           cmake ^
             --build "%GITHUB_WORKSPACE%\aseprite\build" ^
             --target aseprite ^
-            --parallel
+            --parallel 2 ^
+            --verbose
 
           if errorlevel 1 (
             echo Aseprite build failed.
             exit /b 1
           )
 
+          endlocal
+
       - name: Create portable configuration
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $iniPath = "aseprite\build\bin\aseprite.ini"
+          $binDirectory = Join-Path $env:GITHUB_WORKSPACE "aseprite\build\bin"
+          $iniPath = Join-Path $binDirectory "aseprite.ini"
+
+          if (-not (Test-Path -LiteralPath $binDirectory)) {
+            throw "Aseprite bin directory was not created: $binDirectory"
+          }
 
           Set-Content `
-            -Path $iniPath `
-            -Value "# Portable Aseprite configuration"
+            -LiteralPath $iniPath `
+            -Value "# Portable Aseprite configuration" `
+            -Encoding UTF8
 
-          if (-not (Test-Path $iniPath)) {
+          if (-not (Test-Path -LiteralPath $iniPath)) {
             throw "Portable configuration file was not created."
           }
 
@@ -329,27 +390,32 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $executable = "aseprite\build\bin\aseprite.exe"
+          $executable = Join-Path $env:GITHUB_WORKSPACE "aseprite\build\bin\aseprite.exe"
 
-          if (-not (Test-Path $executable)) {
-            throw "Aseprite executable was not created."
+          if (-not (Test-Path -LiteralPath $executable)) {
+            throw "Aseprite executable was not created: $executable"
           }
 
-          Write-Host "Verified: $executable"
+          Write-Host "Verified executable:"
+          Write-Host $executable
 
       - name: Create archive
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $binDirectory = "aseprite\build\bin"
+          $binDirectory = Join-Path $env:GITHUB_WORKSPACE "aseprite\build\bin"
           $archiveName = "Aseprite-$env:ASEPRITE_TAG-Windows.zip"
           $archivePath = Join-Path $binDirectory $archiveName
-          $stagingDirectory = "$env:RUNNER_TEMP\aseprite-release"
+          $stagingDirectory = Join-Path $env:RUNNER_TEMP "aseprite-release"
 
-          if (Test-Path $stagingDirectory) {
+          if (-not (Test-Path -LiteralPath $binDirectory)) {
+            throw "Aseprite bin directory was not found: $binDirectory"
+          }
+
+          if (Test-Path -LiteralPath $stagingDirectory) {
             Remove-Item `
-              -Path $stagingDirectory `
+              -LiteralPath $stagingDirectory `
               -Recurse `
               -Force
           }
@@ -361,7 +427,7 @@ jobs:
             Out-Null
 
           Get-ChildItem `
-            -Path $binDirectory `
+            -LiteralPath $binDirectory `
             -File |
             Where-Object {
               $_.Name -ne $archiveName
@@ -370,27 +436,32 @@ jobs:
               -Destination $stagingDirectory `
               -Force
 
-          if (Test-Path $archivePath) {
+          if (Test-Path -LiteralPath $archivePath) {
             Remove-Item `
-              -Path $archivePath `
+              -LiteralPath $archivePath `
               -Force
           }
 
           7z a `
             "$archivePath" `
-            "$stagingDirectory\*" |
-            Out-Null
+            "$stagingDirectory\*" `
+            -mx=5
 
-          if (-not (Test-Path $archivePath)) {
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release archive creation failed."
+          }
+
+          if (-not (Test-Path -LiteralPath $archivePath)) {
             throw "Release archive was not created."
           }
 
           Write-Host "Created release archive:"
           Write-Host $archivePath
 
-      - name: Upload artifact
+      - name: Upload Aseprite artifact
         uses: actions/upload-artifact@v4
         with:
           name: Aseprite-Windows
           path: aseprite/build/bin/Aseprite-${{ env.ASEPRITE_TAG }}-Windows.zip
           if-no-files-found: error
+          compression-level: 0
